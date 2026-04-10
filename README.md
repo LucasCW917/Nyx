@@ -435,4 +435,682 @@ The absolute last line of defense. Nothing escapes this.
 |32   |VM Numeric Guard          |→ `err()`                  |—                 |
 |33   |VM Memory Guard           |→ `err()`                  |—                 |
 |34   |VM Bounds Guard           |→ `err()`                  |—                 |
+|35   |VM Unexpected Error Trap  |Structured report          |—                 |# Nyx
+
+**A Safe, Fast, Experimental Programming Language**
+*Language Specification & Design Reference — v0.2*
+
+-----
+
+## Overview
+
+Nyx is a statically typed, ownership-based programming language that compiles to custom bytecode and runs on the Nyx Virtual Machine (NyxVM). It is designed to be simultaneously beginner-friendly and production-safe — offering Rust-like memory guarantees without the complexity tax.
+
+Nyx is built around three core values:
+
+- **Simple** — readable syntax, friendly errors, guided best practices
+- **Safe** — 35-stage compiler pipeline, no null, no undefined behavior, no raw crashes
+- **Fast** — ownership-based memory, no garbage collector, green thread runtime
+
+The compiler is called `nyxc`. The virtual machine is called `nyxvm`. Source files use the `.nyx` extension. Compiled bytecode uses `.nyxb`.
+
+-----
+
+## Design Philosophy
+
+### 1-Indexed Arrays
+
+Arrays in Nyx start at index 1, not 0. This eliminates a common class of off-by-one errors. The compiler hard-errors on `arr[0]` accesses.
+
+### % Prefix Convention
+
+Everything that communicates with the compiler uses the `%` prefix. Types, directives, literals — if it tells the compiler something, it starts with `%`. This creates a clear visual distinction between user code and compiler instructions.
+
+### No Null
+
+There is no `null`, `nil`, or `None` in Nyx. Absence is represented by `%void` (which is falsy). Functions that can fail return `%Result<T>`. This eliminates an entire category of runtime errors by construction.
+
+### Friendly Errors
+
+The compiler prefers warnings over errors where safety allows. Missing a `#` prefix at the top level? Warning, not a crash. Using an unknown `%` directive? Warning with a suggestion. Hard errors are reserved for genuinely unsafe situations.
+
+### Everything is `%nyx(){}`
+
+At the compiler level, all code ultimately compiles down to `%nyx(){}` blocks — first-class callable code units. Functions, class methods, lifecycle hooks, and async tasks are all sugar over this primitive.
+
+-----
+
+## File Structure
+
+Every Nyx source file follows the same structure:
+
+```nyx
+// 1. Optional %make block (compile-time config)
+#fn %make() {
+    let %target = "release";
+    let %import = [math, geometry];
+    let %use = [math::add];
+};
+
+// 2. Top-level declarations (must be prefixed with #)
+#class Point { ... };
+#fn %pub calculate() -> %f64 { ... };
+
+// 3. Entry point
+#fn main() -> %void {
+    // program starts here
+};
+```
+
+The entry point defaults to `main` but can be overridden via `%entry` in `%make`.
+
+-----
+
+## Scope Rules
+
+- Every `{}` block is its own independent scope
+- Every statement and closing `}` ends with `;` unless it is a return value
+- Each scope may have at most **one** bare expression (the return value) — hard error if violated
+- Depth 0 (top of file) is the Main scope — declarations must use `#` prefix
+- Missing `#` at depth 0 → warning, proceeds normally
+- Using `#` inside an inner block → hard error
+
+```nyx
+// Valid scope with return value
+#fn add(x: %i32, y: %i32) -> %i32 {
+    let z = x + y;
+    z                // bare expression = return value, no semicolon
+};
+
+// Hard error — two bare expressions in same scope
+#fn bad() -> %i32 {
+    x               // ERROR
+    y               // ERROR
+};
+```
+
+-----
+
+## Directive Reference
+
+Directives use the `%` prefix and are checked against a fixed hardcoded list in the compiler. Using an unknown `%` token produces a warning. Using `%` in the wrong context is a hard error.
+
+### Variable Modifiers
+
+|Directive|Meaning                               |
+|---------|--------------------------------------|
+|`%mut`   |Mutable binding                       |
+|`%pub`   |Public visibility (private by default)|
+
+### Types
+
+|Directive                       |Meaning                                           |
+|--------------------------------|--------------------------------------------------|
+|`%i8` / `%i16` / `%i32` / `%i64`|Signed integers                                   |
+|`%u8` / `%u16` / `%u32` / `%u64`|Unsigned integers                                 |
+|`%f32` / `%f64`                 |Floating point                                    |
+|`%str`                          |String                                            |
+|`%bool`                         |Boolean                                           |
+|`%char`                         |Character                                         |
+|`%void`                         |No value (also falsy)                             |
+|`%rust`                         |Raw Rust code block                               |
+|`%Result<T>`                    |Sugar for `[%bool, T]` — desugared at compile time|
+|`%nyx(){}`                      |First-class Nyx code block                        |
+|`%rust(){}`                     |First-class Rust code block                       |
+
+### Boolean Literals
+
+|Literal |Value                                              |
+|--------|---------------------------------------------------|
+|`%true` |Boolean true                                       |
+|`%false`|Boolean false                                      |
+|`%void` |Also falsy — equivalent to false in boolean context|
+
+### `%make` Directives
+
+Only valid inside `#fn %make()`. Using them outside `%make` is a hard error.
+
+|Directive           |Type         |Meaning                                          |
+|--------------------|-------------|-------------------------------------------------|
+|`%make`             |—            |Marks the compile-time config function           |
+|`%logic-%make`      |`%bool`      |Enables control flow inside `%make`              |
+|`%suppress-warnings`|`%bool`      |Silences all compiler warnings                   |
+|`%target`           |`%str`       |`"debug"` or `"release"`                         |
+|`%entry`            |`%str`       |Override the entry point function name           |
+|`%strict`           |`%bool`      |Treat warnings as hard errors                    |
+|`%hard`             |`[fn, ...]`  |List of functions with restrictions removed      |
+|`%when-run`         |`%rust`      |`%rust` code to execute before program runs      |
+|`%when-compile`     |`%rust`      |`%rust` code to execute before compilation       |
+|`%import`           |`[mod, ...]` |List of Nyx modules to import                    |
+|`%use`              |`[path, ...]`|List of specific items from imported modules     |
+|`%def`              |`[file, ...]`|List of Rust `.rs` / `.dll` / `.so` files to link|
+|`%repl`             |`%bool`      |`%true` launches REPL mode, ignores `main`       |
+|`%async`            |—            |Enables the async green thread runtime           |
+|`%self`             |`%str` or map|Rename the self reference inside class methods   |
+
+-----
+
+## Variables
+
+Variables are immutable by default. Types are inferred but can be annotated explicitly.
+
+```nyx
+let x = 42;                    // immutable, inferred %i64
+let %mut y = 3.14;             // mutable, inferred %f64
+let %mut %i32 z = 100;         // mutable, explicit type
+let %str name = "nyx";         // explicit type, immutable
+```
+
+### Mass `let`
+
+Multiple variables can be declared in a single `let` block:
+
+```nyx
+let = {
+    x = 1,
+    y = 2,
+    %mut %str name = "hello",
+};
+```
+
+### `%make` Globals
+
+Variables declared inside `%make` are permanent compile-time globals, baked into the program. They cannot be overridden at runtime. Attempting to rebind protected names like `%true`, `%false`, or `%void` is a hard error.
+
+-----
+
+## Functions
+
+```nyx
+#fn add(x: %i32, y: %i32) -> %i32 {
+    x + y                      // implicit return
+};
+
+#fn greet(name: %str) -> %void {
+    print("hello {std::hconvert(%str, name)}");
+};
+```
+
+- Functions are private by default — use `%pub` to expose them
+- Last bare expression is the implicit return value
+- Explicit `return x;` is also valid
+- `return x;` with a semicolon is a statement, not the implicit return
+
+### Function Modifiers
+
+|Modifier                 |Meaning                                        |
+|-------------------------|-----------------------------------------------|
+|`#fn %pub foo()`         |Publicly accessible from other modules         |
+|`#fn %async foo()`       |Asynchronous function                          |
+|`#fn %spawn foo()`       |Always runs in its own green thread when called|
+|`#fn %spawn %async foo()`|Threaded and asynchronous                      |
+
+-----
+
+## Classes
+
+Classes bundle data and methods together. Fields are declared in a `create` block. Methods use `%self` to reference the instance.
+
+```nyx
+#class Circle {
+    create {
+        let radius: %f64,
+        let color: %str = "red",   // default value
+    };
+
+    fn area(%self) -> %f64 {
+        3.14159 * %self.radius * %self.radius
+    };
+
+    fn %pub describe(%self) -> %str {
+        "A {std::hconvert(%str, %self.color)} circle"
+    };
+};
+
+// Construction
+let c = Circle.create { radius = 5.0 };
+let area = c.area();
+```
+
+The `%self` keyword can be renamed globally in `%make`:
+
+```nyx
+#fn %make() {
+    let %self = "this";              // all classes use 'this'
+    // or per-class:
+    let %self = {
+        Circle = "this",
+        "self",                      // default fallback
+    };
+};
+```
+
+-----
+
+## Control Flow
+
+### if / else
+
+```nyx
+if x > 0 {
+    "positive"
+} else if x < 0 {
+    "negative"
+} else {
+    "zero"
+};
+```
+
+### while
+
+```nyx
+while x > 0 {
+    x = x - 1;
+};
+```
+
+### loop
+
+```nyx
+let result = loop {
+    if condition {
+        break 42;
+    };
+};
+```
+
+### for
+
+```nyx
+for i in 1..10 {
+    print(arr[i]);
+};
+```
+
+### match
+
+```nyx
+match x {
+    0 => "zero",
+    1..10 => "small",
+    _ => "big",
+};
+```
+
+Match is exhaustive — missing arms are a hard error.
+
+-----
+
+## Memory Model
+
+Nyx uses an ownership-based memory model. There is no garbage collector. Memory is freed deterministically when a value goes out of scope.
+
+### Ownership
+
+```nyx
+let x = 5;          // x owns the value
+let y = x;          // ownership moves to y, x is now invalid
+print(x);           // ERROR: x was moved
+```
+
+### Borrowing
+
+```nyx
+let x = 5;
+let y = &x;         // immutable borrow — x still owns the value
+let z = &mut x;     // ERROR: cannot borrow mutably while immutably borrowed
+```
+
+|Rule                            |Allowed?    |
+|--------------------------------|------------|
+|Multiple `&x` at once           |✅ Yes       |
+|One `&mut x`                    |✅ Yes       |
+|`&x` and `&mut x` simultaneously|❌ Hard error|
+|Two `&mut x` simultaneously     |❌ Hard error|
+|Using `x` after move            |❌ Hard error|
+
+-----
+
+## Error Handling
+
+`%Result<T>` is the standard return type for functions that can fail. It is sugar for `[%bool, T]` — an array where index 1 is the success status and index 2 is the value or error message.
+
+```nyx
+#fn divide(a: %f64, b: %f64) -> %Result<%f64> {
+    if b == 0.0 {
+        err("division by zero")     // [%false, "division by zero"]
+    } else {
+        ok(a / b)                   // [%true, result]
+    }
+};
+
+// Handling
+let result = divide(10.0, 2.0);
+if result[1] {
+    print("success: {std::hconvert(%str, result[2])}");
+} else {
+    print("error: {std::hconvert(%str, result[2])}");
+};
+
+// ? operator — propagates error immediately
+let value = divide(10.0, 0.0)?;    // returns [%false, msg] if err
+```
+
+Every `%Result<T>` must be handled, matched, or propagated with `?`. Ignoring a Result is a hard error.
+
+For unrecoverable errors:
+
+```nyx
+panic("something went catastrophically wrong");
+```
+
+-----
+
+## Arrays
+
+Arrays are 1-indexed. Index 0 is a hard compiler error.
+
+```nyx
+let arr = [10, 20, 30, 40, 50];
+let first = arr[1];             // = 10
+let last = arr[5];              // = 50
+arr[0];                         // HARD ERROR
+
+for i in 1..5 {
+    print(arr[i]);
+};
+```
+
+-----
+
+## Code Blocks — `%nyx(){}`
+
+`%nyx(){}` is the atomic unit of all Nyx code. Everything compiles down to it. Use it explicitly when you need a disposable, one-time code block without polluting the namespace.
+
+```nyx
+// Immediate invocation
+let result = %nyx(x: %i32, y: %i32) -> %i32 {
+    x + y
+}(3, 4);              // = 7
+
+// Pass as argument
+#fn apply(f: %nyx(%i32) -> %i32, val: %i32) -> %i32 {
+    f(val)
+};
+
+let double = %nyx(x: %i32) -> %i32 { x * 2 };
+apply(double, 5);    // = 10
+```
+
+The `-> type` annotation makes the return type explicit and statically checked. Without it, the type is inferred.
+
+Other language blocks follow the same syntax:
+
+```nyx
+let fast-sqrt = %rust(x: %f64) -> %f64 {
+    x.sqrt()
+};
+```
+
+-----
+
+## Imports & Modules
+
+```nyx
+#fn %make() {
+    let %import = [math, geometry];
+    let %use = [math::add, geometry::distance];
+    let %def = ["mylib.rs" as mylib, "fast.dll" as fast];
+};
+```
+
+- `%import` brings a module into scope — required before `%use`
+- `%use` selects specific items and inlines them at call sites
+- `%def` links Rust source files or precompiled binaries
+- Using `%use` without first `%import`ing the module → hard error
+
+### Naming Conflicts
+
+If two `%use`’d items share a name, the compiler warns and revokes the shorthand for both — forcing full namespace paths:
+
+```nyx
+math::add(1, 2);       // required if add conflicts
+geometry::add(1, 2);   // required if add conflicts
+```
+
+### Visibility
+
+Functions and classes are private by default. Use `%pub` to expose them:
+
+```nyx
+#fn %pub add(x: %i32, y: %i32) -> %i32 { x + y };
+```
+
+-----
+
+## Rust Interop
+
+Nyx has two mechanisms for calling Rust code.
+
+### Inline `%rust(){}`
+
+```nyx
+#fn fast-op(x: %f64) -> %f64 {
+    %rust(x: %f64) -> %f64 {
+        x.sqrt()
+    }(x)
+};
+```
+
+### `%def` — External Rust Files
+
+Mark Rust functions with `#[nyx_abi]` to expose them to Nyx. The compiler maps Rust types to Nyx types automatically:
+
+```rust
+// http.rs
+#[nyx_abi]
+pub fn fetch(url: &str) -> Result<String, String> {
+    // ...
+}
+```
+
+```nyx
+// main.nyx
+#fn %make() {
+    let %def = ["http.rs" as http];
+};
+
+let result = http::fetch("https://example.com")?;
+```
+
+### Type Mapping
+
+|Rust Type          |Nyx Type      |
+|-------------------|--------------|
+|`&str` / `String`  |`%str`        |
+|`i8/16/32/64`      |`%i8/16/32/64`|
+|`u8/16/32/64`      |`%u8/16/32/64`|
+|`f32/64`           |`%f32/64`     |
+|`bool`             |`%bool`       |
+|`Result<T, String>`|`%Result<T>`  |
+|`()`               |`%void`       |
+
+Types with no mapping cannot cross the boundary — hard error.
+
+-----
+
+## Async & Green Threads
+
+Nyx uses green threads managed by NyxVM — lightweight, cheap to spawn, and safe by construction via ownership transfer.
+
+```nyx
+#fn %make() {
+    let %async = %true;
+};
+
+// %async function
+#fn %async fetch(url: %str) -> %Result<%str> {
+    let response = await net::get(url)?;
+    ok(response.body)
+};
+
+// %spawn — always runs in its own green thread
+#fn %spawn %async process(data: [%i32]) -> %i32 {
+    await heavy-calculation(data)
+};
+
+// Call and wait
+let result = await process(my-data);
+```
+
+- `await` waits for both `%async` and `%spawn` functions
+- Values are moved into threads — the caller loses ownership
+- Ownership is returned via the function return value
+- `%nyx(){}` blocks cannot be spawned — only `#fn %spawn` can spawn threads
+
+-----
+
+## Built-in Equation Solver
+
+Nyx has algebraic equation solving built into the language via the `%solve` directive. Solving happens at runtime.
+
+```nyx
+// Linear: solve 0 = 2x + 4
+let %solve x = 2 * x + 4;     // x = ok(-2.0)
+
+// Quadratic: two solutions returned as array
+let %solve x = x * x - 4;     // x = [ok(2.0), ok(-2.0)]
+//   x[1] = positive solution
+//   x[2] = negative solution
+
+// No solution returns err
+let %solve x = x + 1;         // x = err("no solution")
+
+// System of equations
+let %solve {
+    x + y = 5;
+    x - y = 1;
+} -> (x, y);
+```
+
+-----
+
+## REPL Mode
+
+REPL mode launches an interactive session. Enable it in `%make`:
+
+```nyx
+#fn %make() {
+    let %repl = %true;
+};
+```
+
+- When `%repl` is `%true`, `#fn main()` is ignored with a warning
+- Variables defined in the session persist between lines
+- Bare expressions print their value automatically
+- Errors print inline without crashing the session
+- The REPL waits for `};` before evaluating a block
+
+-----
+
+## Compilation & Execution Pipeline
+
+Nyx source code passes through 35 distinct stages before producing program output. Every stage has a single responsibility.
+
+|Stage|Name                      |Hard Errors                |Warnings          |
+|-----|--------------------------|---------------------------|------------------|
+|1    |Lexer                     |Malformed tokens           |—                 |
+|2    |`%make` Pass              |Bad directives             |—                 |
+|3    |Parser                    |Scope violations, bad AST  |Missing `#`       |
+|4    |Directive Validator       |Wrong context              |Unknown `%`       |
+|5    |Import Cycle Detector     |Cycles                     |—                 |
+|6    |Type Inference            |Ambiguous types            |—                 |
+|7    |Type Checker              |Type mismatches            |—                 |
+|8    |Strict Inference Validator|Unresolved types           |—                 |
+|9    |Numeric Safety Checker    |Overflow, div/0            |Runtime risk      |
+|10   |Ownership Checker         |Use-after-move, double free|—                 |
+|11   |Borrow Checker            |Borrow conflicts           |—                 |
+|12   |Lifetime Checker          |Dangling references        |—                 |
+|13   |Drop Order Validator      |Bad drop order             |—                 |
+|14   |Double Free Detector      |Double drop                |—                 |
+|15   |Mutability Checker        |Illegal mutation           |—                 |
+|16   |Initialization Checker    |Uninitialized read         |—                 |
+|17   |Exhaustiveness Checker    |Incomplete match           |—                 |
+|18   |Forced Error Handling     |Ignored Result             |—                 |
+|19   |Reachability Checker      |Two bare expressions       |Unreachable code  |
+|20   |Control Flow Analyzer     |Missing return path        |—                 |
+|21   |Panic Analyzer            |—                          |Transitive panics |
+|22   |Dead Code Analyzer        |—                          |Unused code       |
+|23   |Narrowing Checker         |arr[0], bad bounds         |Dynamic index risk|
+|24   |Resource Safety Checker   |Unclosed resource          |—                 |
+|25   |Concurrency Safety Checker|Data races *(future)*      |—                 |
+|26   |`%rust` Isolator          |Bad Rust, ABI mismatch     |`unsafe` usage    |
+|27   |Compiler                  |—                          |—                 |
+|28   |Bytecode Verifier         |Malformed bytecode         |—                 |
+|29   |Bytecode `.nyxb`          |—                          |—                 |
+|30   |VM Startup                |Bad signature, OOM         |—                 |
+|31   |VM Execution              |—                          |—                 |
+|32   |VM Numeric Guard          |→ `err()`                  |—                 |
+|33   |VM Memory Guard           |→ `err()`                  |—                 |
+|34   |VM Bounds Guard           |→ `err()`                  |—                 |
 |35   |VM Unexpected Error Trap  |Structured report          |—                 |
+
+-----
+
+## Project Structure
+
+Nyx is implemented as a Cargo workspace with two crates:
+
+```
+nyx/
+├── Cargo.toml          # workspace root
+├── nyxc/               # Nyx Compiler
+│   └── src/
+│       ├── main.rs     # CLI entrypoint
+│       ├── lexer.rs    # tokenizer
+│       ├── parser.rs   # AST builder
+│       ├── checks/     # all 26 checker passes
+│       └── codegen.rs  # bytecode emitter
+└── nyxvm/              # Nyx Virtual Machine
+    └── src/
+        ├── main.rs     # VM entrypoint
+        ├── vm.rs       # bytecode executor
+        ├── ownership.rs # ownership tracker
+        └── guards/     # runtime safety guards
+```
+
+-----
+
+## Quick Reference
+
+### Keywords
+
+|Keyword              |Purpose                               |
+|---------------------|--------------------------------------|
+|`#fn`                |Top-level function declaration        |
+|`#class`             |Top-level class declaration           |
+|`#namespace`         |Top-level namespace grouping          |
+|`let`                |Variable binding                      |
+|`create`             |Class field declaration block         |
+|`match`              |Pattern matching                      |
+|`if / else if / else`|Conditional                           |
+|`while / loop / for` |Loops                                 |
+|`break`              |Exit loop with optional value         |
+|`return`             |Explicit return                       |
+|`await`              |Wait for `%async` or `%spawn` function|
+|`panic`              |Unrecoverable error                   |
+|`ok / err`           |Result constructors                   |
+
+### Operators
+
+|Operator              |Meaning               |Note                            |
+|----------------------|----------------------|--------------------------------|
+|`&x`                  |Immutable borrow      |                                |
+|`&mut x`              |Mutable borrow        |`x` must be `%mut`              |
+|`?`                   |Propagate error       |Only in `%Result`-returning fns |
+|`::`                  |Namespace path        |e.g. `math::add`                |
+|`1..10`               |Range (inclusive)     |Used in `for` and `match`       |
+|`->`                  |Return type annotation|Also used in `%solve`           |
+|`+  -  *  /  %`       |Arithmetic            |Spaces required around operators|
+|`==  !=  <  >  <=  >=`|Comparison            |                                |
+|`&&  ||  !`           |Logical               |                                |
