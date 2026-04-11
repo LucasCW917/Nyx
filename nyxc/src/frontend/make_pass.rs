@@ -3,7 +3,7 @@
 // isolation, merges top-level #import/#use/#def shorthands, and produces a
 // CompileConfig that all later compiler stages read from.
 
-use crate::lexer::{SpannedToken, Token};
+use crate::frontend::lexer;
 
 // ── CompileConfig ─────────────────────────────────────────────────────────────
 
@@ -960,7 +960,7 @@ pub fn token_to_rust_repr_pub(tok: &Token) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lex;
+    use crate::frontend::lexer;
 
     fn make_config(src: &str) -> CompileConfig {
         let tokens = lex(src).expect("lex failed");

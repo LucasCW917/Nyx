@@ -3,8 +3,8 @@
 // Recursive descent parser. Tracks scope depth, enforces the single-return-
 // value rule, validates # prefix usage, and handles all Nyx syntax constructs.
 
-use crate::lexer::{SpannedToken, Token};
-use crate::make_pass::CompileConfig;
+use crate::frontend::lexer;
+use crate::frontend::make_pass;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AST node types
@@ -1913,8 +1913,8 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lex;
-    use crate::make_pass::{CompileConfig, run_make_pass};
+    use crate::frontend::lexer;
+    use crate::frontend::make_pass;
 
     fn parse_src(src: &str) -> Program {
         let tokens = lex(src).expect("lex failed");
