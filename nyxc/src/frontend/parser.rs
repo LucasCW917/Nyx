@@ -3,8 +3,8 @@
 // Recursive descent parser. Tracks scope depth, enforces the single-return-
 // value rule, validates # prefix usage, and handles all Nyx syntax constructs.
 
-use crate::frontend::lexer;
-use crate::frontend::make_pass;
+use crate::lexer::{SpannedToken, Token};
+use crate::make_pass::CompileConfig;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AST node types
@@ -20,6 +20,10 @@ pub struct Span {
 impl Span {
     fn new(line: usize, col: usize) -> Self { Span { line, col } }
 }
+
+/// A unique ID stamped on every Expr node during parsing.
+/// Used by the TypeTable to associate types with expressions.
+pub type NodeId = usize;
 
 /// The root of the AST — the entire file.
 #[derive(Debug, Clone)]
@@ -195,6 +199,7 @@ pub struct SolveSystem {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    pub id: NodeId,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +371,8 @@ struct Parser<'a> {
     config: &'a CompileConfig,
     /// The self keyword name for this file (from %self rename)
     self_name: String,
+    /// Monotonically incrementing counter — stamps a unique NodeId on every Expr
+    next_id: NodeId,
 }
 
 impl<'a> Parser<'a> {
@@ -374,7 +381,14 @@ impl<'a> Parser<'a> {
             crate::make_pass::SelfRename::Global(s) => s.clone(),
             crate::make_pass::SelfRename::PerClass { default, .. } => default.clone(),
         };
-        Parser { tokens, pos: 0, depth: 0, warnings: Vec::new(), config, self_name }
+        Parser { tokens, pos: 0, depth: 0, warnings: Vec::new(), config, self_name, next_id: 0 }
+    }
+
+    /// Allocate the next NodeId. Called once per Expr construction.
+    fn alloc_id(&mut self) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     // ── Cursor helpers ────────────────────────────────────────────────
@@ -1311,7 +1325,7 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let rhs = self.parse_equality()?;
-            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone() };
+            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone(), id: self.alloc_id() };
         }
         Ok(lhs)
     }
@@ -1327,7 +1341,7 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let rhs = self.parse_comparison()?;
-            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone() };
+            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone(), id: self.alloc_id() };
         }
         Ok(lhs)
     }
@@ -1345,7 +1359,7 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let rhs = self.parse_additive()?;
-            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone() };
+            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone(), id: self.alloc_id() };
         }
         Ok(lhs)
     }
@@ -1361,7 +1375,7 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let rhs = self.parse_multiplicative()?;
-            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone() };
+            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone(), id: self.alloc_id() };
         }
         Ok(lhs)
     }
@@ -1378,7 +1392,7 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let rhs = self.parse_unary()?;
-            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone() };
+            lhs = Expr { kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)), span: span.clone(), id: self.alloc_id() };
         }
         Ok(lhs)
     }
@@ -1389,22 +1403,22 @@ impl<'a> Parser<'a> {
             Some(Token::Bang) => {
                 self.advance();
                 let operand = self.parse_unary()?;
-                return Ok(Expr { kind: ExprKind::Unary(UnaryOp::Not, Box::new(operand)), span });
+                return Ok(Expr { kind: ExprKind::Unary(UnaryOp::Not, Box::new(operand)), span, id: self.alloc_id() });
             }
             Some(Token::Minus) => {
                 self.advance();
                 let operand = self.parse_unary()?;
-                return Ok(Expr { kind: ExprKind::Unary(UnaryOp::Neg, Box::new(operand)), span });
+                return Ok(Expr { kind: ExprKind::Unary(UnaryOp::Neg, Box::new(operand)), span, id: self.alloc_id() });
             }
             Some(Token::Amp) => {
                 self.advance();
                 let operand = self.parse_unary()?;
-                return Ok(Expr { kind: ExprKind::Borrow(Box::new(operand)), span });
+                return Ok(Expr { kind: ExprKind::Borrow(Box::new(operand)), span, id: self.alloc_id() });
             }
             Some(Token::AmpMut) => {
                 self.advance();
                 let operand = self.parse_unary()?;
-                return Ok(Expr { kind: ExprKind::BorrowMut(Box::new(operand)), span });
+                return Ok(Expr { kind: ExprKind::BorrowMut(Box::new(operand)), span, id: self.alloc_id() });
             }
             _ => {}
         }
@@ -1420,7 +1434,7 @@ impl<'a> Parser<'a> {
                 // Function call: expr(args)
                 Some(Token::LParen) => {
                     let args = self.parse_call_args()?;
-                    expr = Expr { kind: ExprKind::Call(Box::new(expr), args), span };
+                    expr = Expr { kind: ExprKind::Call(Box::new(expr), args), span, id: self.alloc_id() };
                 }
 
                 // Index: expr[idx]
@@ -1428,7 +1442,7 @@ impl<'a> Parser<'a> {
                     self.advance(); // [
                     let idx = self.parse_expr()?;
                     self.expect_tok(&Token::RBracket, "index expression")?;
-                    expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), span };
+                    expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), span, id: self.alloc_id() };
                 }
 
                 // Field access or method call: expr.field or expr.method(args)
@@ -1437,16 +1451,16 @@ impl<'a> Parser<'a> {
                     let (field, _) = self.expect_ident("field or method name")?;
                     if self.peek_tok() == Some(&Token::LParen) {
                         let args = self.parse_call_args()?;
-                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), span };
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), span, id: self.alloc_id() };
                     } else {
-                        expr = Expr { kind: ExprKind::Field(Box::new(expr), field), span };
+                        expr = Expr { kind: ExprKind::Field(Box::new(expr), field), span, id: self.alloc_id() };
                     }
                 }
 
                 // ? propagation
                 Some(Token::Question) => {
                     self.advance();
-                    expr = Expr { kind: ExprKind::Propagate(Box::new(expr)), span };
+                    expr = Expr { kind: ExprKind::Propagate(Box::new(expr)), span, id: self.alloc_id() };
                 }
 
                 _ => break,
@@ -1475,12 +1489,12 @@ impl<'a> Parser<'a> {
 
         match self.peek_tok().cloned() {
             // Literals
-            Some(Token::Int(n))   => { self.advance(); Ok(Expr { kind: ExprKind::Int(n),   span }) }
-            Some(Token::Float(f)) => { self.advance(); Ok(Expr { kind: ExprKind::Float(f), span }) }
+            Some(Token::Int(n))   => { self.advance(); Ok(Expr { kind: ExprKind::Int(n),   span, id: self.alloc_id() }) }
+            Some(Token::Float(f)) => { self.advance(); Ok(Expr { kind: ExprKind::Float(f), span, id: self.alloc_id() }) }
             Some(Token::Str(s))   => { self.advance(); Ok(self.parse_interpolated_string(s, span)) }
-            Some(Token::True)     => { self.advance(); Ok(Expr { kind: ExprKind::Bool(true),  span }) }
-            Some(Token::False)    => { self.advance(); Ok(Expr { kind: ExprKind::Bool(false), span }) }
-            Some(Token::Void)     => { self.advance(); Ok(Expr { kind: ExprKind::Void, span }) }
+            Some(Token::True)     => { self.advance(); Ok(Expr { kind: ExprKind::Bool(true),  span, id: self.alloc_id() }) }
+            Some(Token::False)    => { self.advance(); Ok(Expr { kind: ExprKind::Bool(false), span, id: self.alloc_id() }) }
+            Some(Token::Void)     => { self.advance(); Ok(Expr { kind: ExprKind::Void, span, id: self.alloc_id() }) }
 
             // Grouped expression: (expr)
             Some(Token::LParen) => {
@@ -1496,7 +1510,7 @@ impl<'a> Parser<'a> {
             // Block expression: { ... }
             Some(Token::LBrace) => {
                 let block = self.parse_block()?;
-                Ok(Expr { kind: ExprKind::Block(block), span })
+                Ok(Expr { kind: ExprKind::Block(block), span, id: self.alloc_id() })
             }
 
             // if expression
@@ -1520,14 +1534,14 @@ impl<'a> Parser<'a> {
                 let val = if !matches!(self.peek_tok(), Some(Token::Semi) | Some(Token::RBrace) | None) {
                     Some(Box::new(self.parse_expr()?))
                 } else { None };
-                Ok(Expr { kind: ExprKind::Break(val), span })
+                Ok(Expr { kind: ExprKind::Break(val), span, id: self.alloc_id() })
             }
 
             // await expr
             Some(Token::Ident(ref s)) if s == "await" => {
                 self.advance();
                 let inner = self.parse_expr()?;
-                Ok(Expr { kind: ExprKind::Await(Box::new(inner)), span })
+                Ok(Expr { kind: ExprKind::Await(Box::new(inner)), span, id: self.alloc_id() })
             }
 
             // panic(msg)
@@ -1536,7 +1550,7 @@ impl<'a> Parser<'a> {
                 let args = self.parse_call_args()?;
                 let msg = args.into_iter().next()
                     .ok_or_else(|| self.err("panic() requires a message argument"))?;
-                Ok(Expr { kind: ExprKind::Panic(Box::new(msg)), span })
+                Ok(Expr { kind: ExprKind::Panic(Box::new(msg)), span, id: self.alloc_id() })
             }
 
             // ok(value) / err(msg)
@@ -1545,14 +1559,14 @@ impl<'a> Parser<'a> {
                 let args = self.parse_call_args()?;
                 let val = args.into_iter().next()
                     .ok_or_else(|| self.err("ok() requires a value argument"))?;
-                Ok(Expr { kind: ExprKind::Ok(Box::new(val)), span })
+                Ok(Expr { kind: ExprKind::Ok(Box::new(val)), span, id: self.alloc_id() })
             }
             Some(Token::Ident(ref s)) if s == "err" => {
                 self.advance();
                 let args = self.parse_call_args()?;
                 let val = args.into_iter().next()
                     .ok_or_else(|| self.err("err() requires a message argument"))?;
-                Ok(Expr { kind: ExprKind::Err(Box::new(val)), span })
+                Ok(Expr { kind: ExprKind::Err(Box::new(val)), span, id: self.alloc_id() })
             }
 
             // Directive-led expressions: %nyx, %rust, %spawn
@@ -1570,7 +1584,7 @@ impl<'a> Parser<'a> {
                     other => {
                         // Could be a type used in a cast-like context — leave to type checker
                         self.advance();
-                        Ok(Expr { kind: ExprKind::Ident(format!("%{}", other)), span })
+                        Ok(Expr { kind: ExprKind::Ident(format!("%{}", other)), span, id: self.alloc_id() })
                     }
                 }
             }
@@ -1600,9 +1614,9 @@ impl<'a> Parser<'a> {
         }
 
         let base = if path.len() == 1 {
-            Expr { kind: ExprKind::Ident(path.into_iter().next().unwrap()), span: span.clone() }
+            Expr { kind: ExprKind::Ident(path.into_iter().next().unwrap()), span: span.clone(), id: self.alloc_id() }
         } else {
-            Expr { kind: ExprKind::Path(path), span: span.clone() }
+            Expr { kind: ExprKind::Path(path), span: span.clone(), id: self.alloc_id() }
         };
 
         // Class.create { field = val, ... }
@@ -1637,7 +1651,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Expr { kind: ExprKind::Create(Box::new(class), fields), span })
+        Ok(Expr { kind: ExprKind::Create(Box::new(class), fields), span, id: self.alloc_id() })
     }
 
     // ── Array literal ─────────────────────────────────────────────────
@@ -1665,7 +1679,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(Expr { kind: ExprKind::Array(elems), span })
+        Ok(Expr { kind: ExprKind::Array(elems), span, id: self.alloc_id() })
     }
 
     // ── Control flow expressions ──────────────────────────────────────
@@ -1695,7 +1709,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Expr { kind: ExprKind::If(Box::new(cond), then_block, else_ifs, else_block), span })
+        Ok(Expr { kind: ExprKind::If(Box::new(cond), then_block, else_ifs, else_block), span, id: self.alloc_id() })
     }
 
     fn parse_while_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1703,14 +1717,14 @@ impl<'a> Parser<'a> {
         self.advance(); // consume "while"
         let cond = self.parse_expr()?;
         let body = self.parse_block()?;
-        Ok(Expr { kind: ExprKind::While(Box::new(cond), body), span })
+        Ok(Expr { kind: ExprKind::While(Box::new(cond), body), span, id: self.alloc_id() })
     }
 
     fn parse_loop_expr(&mut self) -> Result<Expr, ParseError> {
         let span = self.span();
         self.advance(); // consume "loop"
         let body = self.parse_block()?;
-        Ok(Expr { kind: ExprKind::Loop(body), span })
+        Ok(Expr { kind: ExprKind::Loop(body), span, id: self.alloc_id() })
     }
 
     fn parse_for_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1728,7 +1742,7 @@ impl<'a> Parser<'a> {
         }
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
-        Ok(Expr { kind: ExprKind::For(binding, Box::new(iter), body), span })
+        Ok(Expr { kind: ExprKind::For(binding, Box::new(iter), body), span, id: self.alloc_id() })
     }
 
     fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1749,7 +1763,7 @@ impl<'a> Parser<'a> {
         }
 
         self.depth -= 1;
-        Ok(Expr { kind: ExprKind::Match(Box::new(subject), arms), span })
+        Ok(Expr { kind: ExprKind::Match(Box::new(subject), arms), span, id: self.alloc_id() })
     }
 
     fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
@@ -1816,7 +1830,7 @@ impl<'a> Parser<'a> {
             Some(self.parse_type_expr()?)
         } else { None };
         let body = self.parse_block()?;
-        Ok(Expr { kind: ExprKind::NyxBlock(params, ret_ty, body), span })
+        Ok(Expr { kind: ExprKind::NyxBlock(params, ret_ty, body), span, id: self.alloc_id() })
     }
 
     fn parse_rust_block_expr(&mut self, span: Span) -> Result<Expr, ParseError> {
@@ -1864,10 +1878,10 @@ impl<'a> Parser<'a> {
 
     /// Walk a string literal and split it into literal and interpolated segments.
     /// Interpolated segments look like `{expr}` inside the string.
-    fn parse_interpolated_string(&self, raw: String, span: Span) -> Expr {
+    fn parse_interpolated_string(&mut self, raw: String, span: Span) -> Expr {
         // A quick scan: if there is no `{`, return a plain Str.
         if !raw.contains('{') {
-            return Expr { kind: ExprKind::Str(raw), span };
+            return Expr { kind: ExprKind::Str(raw), span, id: self.alloc_id() };
         }
 
         let mut segments: Vec<InterpolSegment> = Vec::new();
@@ -1902,7 +1916,7 @@ impl<'a> Parser<'a> {
             segments.push(InterpolSegment::Lit(lit));
         }
 
-        Expr { kind: ExprKind::Interpolated(segments), span }
+        Expr { kind: ExprKind::Interpolated(segments), span, id: self.alloc_id() }
     }
 }
 
@@ -1913,8 +1927,8 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::lexer;
-    use crate::frontend::make_pass;
+    use crate::lexer::lex;
+    use crate::make_pass::{CompileConfig, run_make_pass};
 
     fn parse_src(src: &str) -> Program {
         let tokens = lex(src).expect("lex failed");

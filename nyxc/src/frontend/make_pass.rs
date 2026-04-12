@@ -3,8 +3,6 @@
 // isolation, merges top-level #import/#use/#def shorthands, and produces a
 // CompileConfig that all later compiler stages read from.
 
-use crate::frontend::lexer;
-
 // ── CompileConfig ─────────────────────────────────────────────────────────────
 
 /// The output of the %make pass. Every later compiler stage receives a
@@ -49,6 +47,8 @@ pub struct CompileConfig {
     /// %when-compile — raw Rust code executed immediately during this pass.
     /// Already fired by the time CompileConfig is returned.
     pub when_compile: Option<String>,
+
+    pub look_for_path: Option<String>,
 
     /// %self rename — how instances refer to themselves inside class methods.
     pub self_rename: SelfRename,
@@ -960,7 +960,6 @@ pub fn token_to_rust_repr_pub(tok: &Token) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::lexer;
 
     fn make_config(src: &str) -> CompileConfig {
         let tokens = lex(src).expect("lex failed");
